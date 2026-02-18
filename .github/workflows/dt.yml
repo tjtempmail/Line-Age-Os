@@ -1,11 +1,7 @@
-name: Generate LineageOS Device Tree using dumpyara + aospdtgen
+name: Generate LineageOS Device Tree (dumpyara + aospdtgen)
 
 permissions:
   contents: write
-  actions: read
-  checks: read
-  pull-requests: read
-  statuses: read
 
 on:
   workflow_dispatch:
@@ -14,242 +10,91 @@ on:
         description: 'Direct URL to firmware zip (stock ROM)'
         required: true
       DEVICE_CODENAME:
-        description: 'Device codename (e.g., surya, joyeuse)'
+        description: 'Device codename (e.g., surya)'
         required: true
       BRAND:
-        description: 'Device brand (e.g., xiaomi, samsung)'
+        description: 'Device brand (e.g., xiaomi)'
         required: true
       MODEL:
         description: 'Device model (e.g., Redmi Note 9 Pro)'
         required: true
 
 jobs:
-  generate-device-tree:
+  build:
     runs-on: ubuntu-22.04
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
 
-    - name: Install dependencies
+    steps:
+    - name: Install system dependencies
       run: |
         sudo apt update
-        sudo apt install -y python3 python3-pip python3-venv wget aria2 \
-          unzip lz4 brotli p7zip-full simg2img img2simg \
-          android-sdk-libsparse-utils
-        pip3 install --upgrade pip
+        sudo apt install -y python3 python3-pip wget aria2 unzip lz4 brotli p7zip-full simg2img android-sdk-libsparse-utils
 
-    - name: Clone and setup dumpyara
+    - name: Clone and install dumpyara
       run: |
         git clone https://github.com/sebaubuntu-python/dumpyara.git
         cd dumpyara
-        python3 -m venv venv
-        source venv/bin/activate
-        pip install -r requirements.txt
-        # Keep venv activated for next steps
-        echo "source dumpyara/venv/bin/activate" >> $GITHUB_ENV
+        pip install -e .
+        cd ..
 
-    - name: Clone and setup aospdtgen
+    - name: Clone and install aospdtgen
       run: |
         git clone https://github.com/sebaubuntu-python/aospdtgen.git
         cd aospdtgen
-        python3 -m venv venv
-        source venv/bin/activate
-        pip install -r requirements.txt
-        # Ye baad me use hoga
-        echo "source aospdtgen/venv/bin/activate" >> $GITHUB_ENV_2
+        pip install -e .
+        cd ..
 
     - name: Download firmware
       run: |
         aria2c -x 16 -s 16 -o firmware.zip "${{ github.event.inputs.FIRMWARE_URL }}"
-        echo "Downloaded firmware:"
-        ls -lh firmware.zip
 
-    - name: Extract firmware and create dump with dumpyara
+    - name: Extract images from firmware
       run: |
-        source dumpyara/venv/bin/activate
-        
-        # Create working directory
-        mkdir -p working_dir
-        
-        # First extract all images from firmware.zip
-        cd working_dir
-        
-        # Handle different firmware types (simplified - dumpyara can handle raw images)
-        if [[ "${{ github.event.inputs.FIRMWARE_URL }}" == *"miui"* ]] || unzip -l ../firmware.zip 2>/dev/null | grep -q "payload.bin"; then
-          echo "📦 Xiaomi ROM detected - extracting payload.bin"
-          unzip ../firmware.zip "payload.bin" -d .
+        mkdir -p images
+        # Try to extract all .img files directly
+        unzip firmware.zip "*.img" -d images/ || true
+        # If no .img found, try handling payload.bin (Xiaomi)
+        if [ ! "$(ls -A images)" ]; then
+          unzip firmware.zip "payload.bin" -d .
           git clone https://github.com/cyxx/extract_android_ota_payload.git
           cd extract_android_ota_payload
           python3 extract_android_ota_payload.py ../payload.bin ../images/
           cd ..
-          mv images/* ./
-        else
-          # Try to extract all .img files
-          unzip ../firmware.zip "*.img" -d . || 7z x ../firmware.zip -o. -y
         fi
-        
-        cd ..
-        
-        # Now run dumpyara on the extracted images
-        echo "🔄 Running dumpyara to create system dump..."
-        cd dumpyara
-        source venv/bin/activate
-        
-        # Create output directory for dump
-        mkdir -p ../dumpyara_output
-        
-        # dumpyara extracts and organizes all partitions
-        python dumpyara.py ../working_dir --output ../dumpyara_output
-        
-        cd ..
-        
-        echo "✅ dumpyara completed. Output structure:"
-        ls -la dumpyara_output/
+        # If still empty, try 7z as fallback
+        if [ ! "$(ls -A images)" ]; then
+          7z x firmware.zip -oimages/ -y
+        fi
+        echo "Extracted files:"
+        ls -l images/
+
+    - name: Run dumpyara to create system dump
+      run: |
+        mkdir -p dumpyara_output
+        # dumpyara expects a directory containing images
+        python -m dumpyara images/ -o dumpyara_output/
 
     - name: Run aospdtgen on the dump
       run: |
-        source aospdtgen/venv/bin/activate
-        
-        # Verify dump structure
-        if [ ! -d "dumpyara_output" ]; then
-          echo "❌ dumpyara_output not found!"
-          exit 1
-        fi
-        
-        # Create output directory for device tree
-        mkdir -p device_tree_output
-        
-        # Run aospdtgen on the dump created by dumpyara
-        echo "🔄 Running aospdtgen on dumpyara output..."
-        cd aospdtgen
-        source venv/bin/activate
-        
-        python -m aospdtgen ../dumpyara_output -o ../device_tree_output
-        
-        cd ..
-        
-        echo "✅ aospdtgen completed. Device tree generated at:"
-        ls -la device_tree_output/
+        mkdir -p device_tree
+        python -m aospdtgen dumpyara_output/ -o device_tree/
 
-    - name: Organize and package device tree
+    - name: Package device tree
       run: |
-        # Create proper device path structure
-        DEVICE_PATH="${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}"
-        mkdir -p final_device_tree/device/$DEVICE_PATH
-        
-        # Copy generated files
-        if [ -d "device_tree_output" ]; then
-          cp -r device_tree_output/* final_device_tree/device/$DEVICE_PATH/ 2>/dev/null || true
-        fi
-        
-        # Add comprehensive README
-        cat > final_device_tree/README.md << 'EOF'
-        # LineageOS Device Tree for ${{ github.event.inputs.MODEL }}
-        
-        ## 📱 Device Information
-        - **Device:** ${{ github.event.inputs.MODEL }}
-        - **Codename:** ${{ github.event.inputs.DEVICE_CODENAME }}
-        - **Brand:** ${{ github.event.inputs.BRAND }}
-        
-        ## 🤖 Generation Method
-        This device tree was generated using the official toolchain:
-        1. **[dumpyara](https://github.com/sebaubuntu-python/dumpyara)** - Created complete system dump from stock ROM
-        2. **[aospdtgen](https://github.com/sebaubuntu-python/aospdtgen)** - Generated LineageOS-compatible device tree
-        
-        ## 📦 What's Included
-        ✅ Complete partition information
-        ✅ Proprietary blobs list (`proprietary-files.txt`)
-        ✅ Vendor blobs tree
-        ✅ BoardConfig.mk with detected values
-        ✅ AndroidProducts.mk
-        ✅ Device.mk with basic configuration
-        ✅ extract-files.sh script
-        ✅ setup-makefiles.sh
-        
-        ## 🔧 Manual Fixes Required
-        You MUST fix the following:
-        
-        ### 1. Kernel Source
-        In `BoardConfig.mk`, update these lines:
-        ```makefile
-        TARGET_KERNEL_SOURCE := kernel/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}
-        TARGET_KERNEL_CONFIG := your_device_defconfig
-        ```
-        
-        ### 2. Proprietary Blobs
-        Run from your device:
-        ```bash
-        cd device/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}
-        ./extract-files.sh
-        ```
-        
-        ### 3. Verify Partition Sizes
-        Check `BoardConfig.mk` for correct:
-        - `BOARD_SYSTEMIMAGE_PARTITION_SIZE`
-        - `BOARD_VENDORIMAGE_PARTITION_SIZE`
-        - `BOARD_BOOTIMAGE_PARTITION_SIZE`
-        
-        ### 4. Device Features
-        Add HALs for:
-        - Camera
-        - Sensors
-        - Lights
-        - Audio
-        - GPS
-        
-        ### 5. SELinux Policies
-        Update `sepolicy` directory with device-specific rules.
-        
-        ## 🚀 How to Build
-        1. Clone this tree to `device/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}`
-        2. Clone kernel source to `kernel/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}`
-        3. Setup LineageOS build environment
-        4. Run `breakfast ${{ github.event.inputs.DEVICE_CODENAME }}`
-        5. Run `brunch ${{ github.event.inputs.DEVICE_CODENAME }}`
-        
-        ## ⚠️ Disclaimer
-        This is an **auto-generated tree** and requires significant manual work to become fully functional. Use as a starting point only!
-        EOF
-        
-        # Create final archive
-        cd final_device_tree
+        # Create proper structure
+        mkdir -p final/device/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}
+        cp -r device_tree/* final/device/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}/ 2>/dev/null || true
+        cd final
         tar -czf ../lineage_device_tree_${{ github.event.inputs.DEVICE_CODENAME }}.tar.gz *
         cd ..
-        
-        echo "✅ Final package created: lineage_device_tree_${{ github.event.inputs.DEVICE_CODENAME }}.tar.gz"
 
     - name: Upload to Release
       uses: softprops/action-gh-release@v2
       with:
         files: lineage_device_tree_*.tar.gz
-        name: "LineageOS Device Tree for ${{ github.event.inputs.DEVICE_CODENAME }} (dumpyara+aospdtgen)"
-        tag_name: aospdtgen_${{ github.run_id }}
+        name: "LineageOS Device Tree for ${{ github.event.inputs.DEVICE_CODENAME }}"
+        tag_name: dt_${{ github.run_id }}
         body: |
-          ## 🎯 LineageOS Device Tree generated with **dumpyara + aospdtgen**
-          
-          ### 📱 Device: ${{ github.event.inputs.MODEL }} (${{ github.event.inputs.DEVICE_CODENAME }})
-          
-          ### ✅ What's included:
-          - Complete partition structure from stock ROM
-          - All proprietary blobs detected
-          - Vendor tree with extracted files
-          - Basic configuration files
-          - extract-files.sh and setup-makefiles.sh scripts
-          
-          ### ❌ Manual fixes needed:
-          1. **Kernel source** - Add correct kernel repo and defconfig
-          2. **Run extract-files.sh** from actual device to get latest blobs
-          3. **Verify all partition sizes** in BoardConfig.mk
-          4. **Add device-specific HALs** (camera, sensors, etc.)
-          5. **Fix SELinux policies**
-          
-          ### 📦 How to use:
-          1. Download and extract `lineage_device_tree_${{ github.event.inputs.DEVICE_CODENAME }}.tar.gz`
-          2. Copy contents to `device/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}`
-          3. Clone kernel source to `kernel/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}`
-          4. Follow the detailed instructions in README.md
-          
-          **Note:** This is an auto-generated starting point - expect build errors that need manual fixes!
+          Device tree generated using dumpyara + aospdtgen.
+          **Note:** This is auto-generated – manual fixes required (kernel source, etc.)
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
