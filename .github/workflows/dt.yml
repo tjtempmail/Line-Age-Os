@@ -10,10 +10,10 @@ on:
         description: 'Direct URL to firmware zip (stock ROM)'
         required: true
       DEVICE_CODENAME:
-        description: 'Device codename (e.g., surya, joyeuse)'
+        description: 'Device codename (e.g., X659B)'
         required: true
       BRAND:
-        description: 'Device brand (e.g., xiaomi, infinix)'
+        description: 'Device brand (e.g., infinix)'
         required: true
       MODEL:
         description: 'Device model (e.g., Infinix Hot 10i)'
@@ -29,7 +29,7 @@ jobs:
         sudo apt update
         sudo apt install -y python3 python3-pip wget aria2 unzip lz4 brotli p7zip-full \
           simg2img android-sdk-libsparse-utils \
-          erofs-utils   # EROFS support ke liye
+          erofs-utils   # EROFS support ke liye (super.img ke liye)
 
     - name: Clone and install dumpyara
       run: |
@@ -49,30 +49,11 @@ jobs:
       run: |
         aria2c -x 16 -s 16 -o firmware.zip "${{ github.event.inputs.FIRMWARE_URL }}"
 
-    - name: Extract images from firmware
-      run: |
-        mkdir -p images
-        # Pehle .img files extract karo (agar zip me direct ho)
-        unzip firmware.zip "*.img" -d images/ || true
-        # Agar koi .img nahi mila, to payload.bin handle karo (Xiaomi style)
-        if [ ! "$(ls -A images)" ]; then
-          unzip firmware.zip "payload.bin" -d .
-          git clone https://github.com/cyxx/extract_android_ota_payload.git
-          cd extract_android_ota_payload
-          python3 extract_android_ota_payload.py ../payload.bin ../images/
-          cd ..
-        fi
-        # Agar ab bhi empty hai, to 7z se pure zip extract kar do
-        if [ ! "$(ls -A images)" ]; then
-          7z x firmware.zip -oimages/ -y
-        fi
-        echo "Extracted files:"
-        ls -l images/
-
+    # ⚠️ IMPORTANT: Directly use firmware.zip with dumpyara, no manual extraction
     - name: Run dumpyara to create system dump
       run: |
         mkdir -p dumpyara_output
-        python -m dumpyara images/ -o dumpyara_output/
+        python -m dumpyara firmware.zip -o dumpyara_output/
 
     - name: Run aospdtgen on the dump
       run: |
@@ -81,7 +62,6 @@ jobs:
 
     - name: Package device tree
       run: |
-        # Device tree ko proper path me arrange karo
         mkdir -p final/device/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}
         cp -r device_tree/* final/device/${{ github.event.inputs.BRAND }}/${{ github.event.inputs.DEVICE_CODENAME }}/ 2>/dev/null || true
         cd final
